@@ -1,0 +1,22 @@
+# Ignora tutti i file Markdown
+*.md
+*.MD
+
+# Mantieni tracciato il README
+!README.md
+!readme.md
+
+# Cache e file temporanei Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Ambiente virtuale
+venv/
+venv-latest/
+
+# Download generati dall'app
+downloads/
+
+# File di sistema macOS
+.DS_Store
