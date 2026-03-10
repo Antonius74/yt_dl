@@ -91,6 +91,23 @@ def _extract_video_id(url: str) -> Optional[str]:
     return None
 
 
+def normalize_youtube_url(url: str) -> str:
+    """
+    Normalizza URL YouTube condivisi in formato canonico watch?v=<id>.
+
+    Questo elimina parametri di tracking (es. ?si=...) che possono comparire
+    nei link short condivisi.
+    """
+    if not isinstance(url, str):
+        return ""
+
+    raw = url.strip()
+    video_id = _extract_video_id(raw)
+    if video_id and _is_video_id(video_id):
+        return f"https://www.youtube.com/watch?v={video_id}"
+    return raw
+
+
 def validate_url(url: Optional[str]) -> bool:
     """
     Valida se l'URL è un URL YouTube valido.
@@ -122,6 +139,8 @@ def _map_download_error(raw_error: Exception) -> str:
         return "Video non disponibile o rimosso."
     if "ffmpeg" in error_msg:
         return "FFmpeg non è installato o non è configurato correttamente."
+    if "failed to resolve" in error_msg or "name resolution" in error_msg:
+        return "Errore di rete/DNS: impossibile raggiungere YouTube dal server."
 
     return f"Errore durante il download: {raw_error}"
 
@@ -139,14 +158,16 @@ def get_video_info(url: str) -> dict[str, Any]:
     Raises:
         DownloadError: Se il video non è accessibile
     """
-    if not validate_url(url):
+    normalized_url = normalize_youtube_url(url)
+
+    if not validate_url(normalized_url):
         raise DownloadError("URL non valido. Inserisci un URL YouTube valido.")
 
     try:
         opts = _get_yt_dlp_opts({"quiet": True, "skip_download": True})
         with YoutubeDL(opts) as ydl:
             _configure_js_runtime(ydl)
-            info = ydl.extract_info(url, download=False)
+            info = ydl.extract_info(normalized_url, download=False)
 
         return {
             "title": info.get("title", "Sconosciuto"),
@@ -241,7 +262,9 @@ def download_mp3(
     Raises:
         DownloadError: Se il download fallisce
     """
-    if not validate_url(url):
+    normalized_url = normalize_youtube_url(url)
+
+    if not validate_url(normalized_url):
         raise DownloadError("URL non valido. Inserisci un URL YouTube valido.")
 
     os.makedirs(output_dir, exist_ok=True)
@@ -266,7 +289,7 @@ def download_mp3(
     try:
         with YoutubeDL(ydl_opts) as ydl:
             _configure_js_runtime(ydl)
-            info = ydl.extract_info(url, download=True)
+            info = ydl.extract_info(normalized_url, download=True)
             prepared_filename = ydl.prepare_filename(info)
             return _resolve_output_path(prepared_filename, "mp3")
     except Exception as exc:
@@ -292,7 +315,9 @@ def download_mp4(
     Raises:
         DownloadError: Se il download fallisce
     """
-    if not validate_url(url):
+    normalized_url = normalize_youtube_url(url)
+
+    if not validate_url(normalized_url):
         raise DownloadError("URL non valido. Inserisci un URL YouTube valido.")
 
     os.makedirs(output_dir, exist_ok=True)
@@ -311,7 +336,7 @@ def download_mp4(
     try:
         with YoutubeDL(ydl_opts) as ydl:
             _configure_js_runtime(ydl)
-            info = ydl.extract_info(url, download=True)
+            info = ydl.extract_info(normalized_url, download=True)
             prepared_filename = ydl.prepare_filename(info)
             return _resolve_output_path(prepared_filename, "mp4")
     except Exception as exc:

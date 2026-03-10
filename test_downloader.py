@@ -8,6 +8,7 @@ import pytest
 from unittest.mock import patch, MagicMock
 from downloader import (
     validate_url,
+    normalize_youtube_url,
     get_video_info,
     download_mp3,
     download_mp4,
@@ -67,6 +68,25 @@ class TestValidateUrl:
     def test_invalid_url_random_string(self):
         """Test stringa casuale."""
         assert validate_url("not_a_url") is False
+
+
+class TestNormalizeYoutubeUrl:
+    """Test per la normalizzazione degli URL YouTube condivisi."""
+
+    def test_normalize_short_url_with_tracking_params(self):
+        """Normalizza URL youtu.be con parametri di tracking."""
+        normalized = normalize_youtube_url("https://youtu.be/0CdE6oTkbj4?is=8cVYuPO6dQHxdprB")
+        assert normalized == "https://www.youtube.com/watch?v=0CdE6oTkbj4"
+
+    def test_normalize_watch_url_preserves_video_id(self):
+        """Normalizza URL watch mantenendo lo stesso video id."""
+        normalized = normalize_youtube_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ&si=abc")
+        assert normalized == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+    def test_normalize_invalid_url_returns_trimmed_input(self):
+        """URL non valido: ritorna la stringa ripulita."""
+        normalized = normalize_youtube_url(" not_a_url ")
+        assert normalized == "not_a_url"
 
 
 class TestGetVideoInfo:

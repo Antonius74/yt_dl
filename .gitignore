@@ -10,6 +10,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+pop_cw.py
 
 # Ambiente virtuale
 venv/

@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="{{ lang }}">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ texts.app_title }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='styles.css') }}">
+</head>
+<body>
+    <main class="app-shell">
+        <header class="yt-topbar">
+            <div class="yt-brand">
+                <span class="yt-logo">▶</span>
+                <span class="brand-text">{{ texts.app_title }}</span>
+            </div>
+        </header>
+
+        <section class="surface">
+            <h1 class="hero-title">{{ texts.hero_title }}</h1>
+            <p class="hero-subtitle">{{ texts.hero_subtitle }}</p>
+        </section>
+
+        <section class="surface controls-surface">
+            <label for="url-input" class="control-label">{{ texts.url_label }}</label>
+            <input id="url-input" type="text" autocomplete="off" placeholder="{{ texts.url_placeholder }}">
+
+            <div class="format-block">
+                <p class="control-label">{{ texts.format_label }}</p>
+                <div class="format-options">
+                    <label class="radio-pill">
+                        <input type="radio" name="output-format" value="mp3">
+                        <span>{{ texts.format_mp3 }}</span>
+                    </label>
+                    <label class="radio-pill">
+                        <input type="radio" name="output-format" value="mp4" checked>
+                        <span>{{ texts.format_mp4 }}</span>
+                    </label>
+                </div>
+            </div>
+
+            <button id="download-btn" type="button" disabled>{{ texts.download_button }}</button>
+            <p id="inline-status" class="inline-status"></p>
+        </section>
+
+        <section id="message-area" aria-live="polite"></section>
+
+        <section id="preview-card" class="surface hidden">
+            <h2 class="section-title">{{ texts.preview_title }}</h2>
+            <div class="preview-grid">
+                <div class="preview-thumb-wrap">
+                    <img id="preview-thumb" alt="Preview thumbnail">
+                </div>
+                <div class="preview-meta-wrap">
+                    <p id="preview-video-title" class="preview-title"></p>
+                    <p id="preview-channel" class="preview-meta"></p>
+                    <div class="chip-row">
+                        <span id="preview-duration" class="chip"></span>
+                        <span id="preview-views" class="chip"></span>
+                    </div>
+                    <p id="preview-live" class="warning hidden"></p>
+                </div>
+            </div>
+        </section>
+
+        <section class="surface">
+            <h2 class="section-title">{{ texts.downloads_title }}</h2>
+            <div id="jobs-list" class="list-block"></div>
+
+            <h3 class="subheading">{{ texts.session_files }}</h3>
+            <div id="files-list" class="list-block"></div>
+        </section>
+
+        <footer class="footer-note">{{ texts.copyright_note }}</footer>
+    </main>
+
+    <div class="bottom-action-bar" role="region" aria-label="{{ texts.bottom_bar_label }}">
+        <div class="bottom-action-info">
+            <p class="bottom-action-label">{{ texts.bottom_bar_label }}</p>
+            <p id="bottom-format" class="bottom-format">{{ texts.format_mp4 }}</p>
+            <p id="bottom-inline-status" class="bottom-inline-status"></p>
+        </div>
+        <button id="download-btn-bottom" type="button" disabled>{{ texts.download_button }}</button>
+    </div>
+
+    <script id="i18n-data" type="application/json">{{ texts | tojson }}</script>
+    <script id="config-data" type="application/json">{{ config | tojson }}</script>
+    <script src="{{ url_for('static', path='app.js') }}" defer></script>
+</body>
+</html>

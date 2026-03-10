@@ -1,681 +1,484 @@
-"""
-Interfaccia web Streamlit con Material Design e UX ispirata a YouTube.
-"""
+"""Server web nativo (FastAPI) per YouTube Downloader con UI custom HTML/CSS/JS."""
 
 from __future__ import annotations
 
-import html
+import locale
 import os
-from datetime import datetime
-from typing import Any
+import re
+import threading
+import time
+import uuid
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Literal
+from urllib.parse import quote
 
-import streamlit as st
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
 
-from downloader import (
-    DownloadError,
-    cleanup_downloads,
-    download_mp3,
-    download_mp4,
-    get_downloaded_files,
-    get_video_info,
-    validate_url,
-)
-
-
-# Configurazione pagina principale.
-st.set_page_config(
-    page_title="YT Downloader",
-    page_icon="▶️",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
+from downloader import DownloadError, download_mp3, download_mp4, get_video_info, validate_url
 
 
-APP_CSS = """
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap');
+BASE_DIR = Path(__file__).resolve().parent
+DOWNLOAD_ROOT = BASE_DIR / "downloads"
+TEMPLATES_DIR = BASE_DIR / "templates"
+STATIC_DIR = BASE_DIR / "static"
 
-    :root {
-        --bg: #0f0f0f;
-        --surface: #1c1c1c;
-        --surface-soft: #242424;
-        --text: #f1f1f1;
-        --muted: #a8a8a8;
-        --accent: #ff0033;
-        --accent-dark: #d1002a;
-        --outline: rgba(255, 255, 255, 0.14);
-        --ok-bg: rgba(46, 125, 50, 0.25);
-        --ok-border: rgba(46, 125, 50, 0.45);
-        --err-bg: rgba(198, 40, 40, 0.24);
-        --err-border: rgba(198, 40, 40, 0.5);
-    }
+SESSION_COOKIE_NAME = "yt_session_id"
+SESSION_COOKIE_MAX_AGE = 60 * 60 * 24 * 30  # 30 giorni
+SESSION_COOKIE_PATTERN = re.compile(r"^[a-f0-9]{32}$")
 
-    * {
-        font-family: 'Roboto', sans-serif !important;
-    }
-
-    #MainMenu,
-    header,
-    footer {
-        visibility: hidden;
-    }
-
-    .stApp {
-        background:
-            radial-gradient(900px 400px at 8% -10%, rgba(255, 0, 51, 0.22), transparent 60%),
-            radial-gradient(600px 280px at 92% -5%, rgba(255, 255, 255, 0.06), transparent 65%),
-            var(--bg);
-        color: var(--text);
-    }
-
-    .block-container {
-        max-width: 980px;
-        padding-top: 1.2rem;
-        padding-bottom: 2.4rem;
-    }
-
-    .yt-topbar {
-        position: sticky;
-        top: 0;
-        z-index: 9;
-        background: transparent;
-        backdrop-filter: none;
-        border: none;
-        border-radius: 18px;
-        padding: 0;
-        margin-bottom: 1rem;
-        display: flex;
-        align-items: center;
-        justify-content: flex-start;
-        gap: 1rem;
-    }
-
-    .yt-brand {
-        display: flex;
-        align-items: center;
-        gap: 0.6rem;
-        font-weight: 700;
-        letter-spacing: 0.2px;
-        color: var(--text);
-    }
-
-    .yt-logo {
-        width: 40px;
-        height: 28px;
-        border-radius: 8px;
-        background: var(--accent);
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        color: white;
-        font-size: 14px;
-        box-shadow: 0 8px 24px rgba(255, 0, 51, 0.35);
-    }
-
-    .yt-topbar .muted {
-        color: var(--muted);
-        font-size: 0.9rem;
-    }
-
-    .surface {
-        background: transparent;
-        border: none;
-        border-radius: 24px;
-        padding: 0;
-        box-shadow: none;
-        margin-bottom: 1.2rem;
-    }
-
-    .hero-title {
-        font-size: clamp(1.4rem, 2.3vw, 2rem);
-        font-weight: 700;
-        margin: 0;
-        color: var(--text);
-    }
-
-    .hero-subtitle {
-        margin-top: 0.35rem;
-        color: var(--muted);
-        font-size: 0.98rem;
-    }
-
-    .chip-row {
-        margin-top: 0.75rem;
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.45rem;
-    }
-
-    .chip {
-        background: rgba(255, 255, 255, 0.08);
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        border-radius: 999px;
-        padding: 0.35rem 0.65rem;
-        font-size: 0.8rem;
-        color: var(--text);
-    }
-
-    .preview-title {
-        font-size: 1.2rem;
-        margin: 0;
-        line-height: 1.35;
-    }
-
-    .preview-meta {
-        color: var(--muted);
-        font-size: 0.9rem;
-        margin-top: 0.35rem;
-    }
-
-    .status-msg {
-        margin-top: 0.7rem;
-        color: var(--muted);
-        font-size: 0.92rem;
-    }
-
-    .alert-ok,
-    .alert-error {
-        border-radius: 16px;
-        padding: 0.8rem 1rem;
-        border: 1px solid;
-        margin-bottom: 0.8rem;
-        font-size: 0.95rem;
-    }
-
-    .alert-ok {
-        background: var(--ok-bg);
-        border-color: var(--ok-border);
-    }
-
-    .alert-error {
-        background: var(--err-bg);
-        border-color: var(--err-border);
-    }
-
-    .library-label {
-        color: var(--muted);
-        font-size: 0.86rem;
-    }
-
-    .library-name {
-        color: var(--text);
-        font-size: 0.95rem;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-    }
-
-    .stTextInput label,
-    .stRadio label,
-    .stMarkdown,
-    .stCaption,
-    .stAlert {
-        color: var(--text) !important;
-    }
-
-    .stTextInput input {
-        background: transparent !important;
-        border: none !important;
-        border-bottom: none !important;
-        border-radius: 0 !important;
-        box-shadow: none !important;
-        color: var(--text) !important;
-    }
-
-    .stTextInput [data-baseweb='input'] {
-        background: transparent !important;
-        border: none !important;
-        box-shadow: none !important;
-    }
-
-    .stTextInput [data-baseweb='input']:focus-within {
-        border: none !important;
-        box-shadow: none !important;
-    }
-
-    .stTextInput input:focus {
-        border: none !important;
-        border-bottom: none !important;
-        box-shadow: none !important;
-    }
-
-    .stRadio [role='radiogroup'] {
-        gap: 1rem;
-        background: transparent !important;
-        border: none !important;
-        border-radius: 0 !important;
-        padding: 0 !important;
-    }
-
-    .stButton button,
-    .stDownloadButton button {
-        border-radius: 999px !important;
-        border: 1px solid var(--outline) !important;
-        font-weight: 600 !important;
-        letter-spacing: 0.2px;
-    }
-
-    .stButton button[kind='primary'],
-    .stDownloadButton button[kind='primary'] {
-        background: linear-gradient(180deg, var(--accent), var(--accent-dark)) !important;
-        color: #ffffff !important;
-        border: none !important;
-        box-shadow: 0 10px 30px rgba(255, 0, 51, 0.35) !important;
-    }
-
-    .stButton button:hover,
-    .stDownloadButton button:hover {
-        transform: translateY(-1px);
-    }
-
-    @media (max-width: 760px) {
-        .block-container {
-            padding-top: 0.8rem;
-            padding-bottom: 1.4rem;
-        }
-
-        .yt-topbar {
-            border-radius: 14px;
-            padding: 0.6rem 0.8rem;
-        }
-
-        .surface {
-            border-radius: 18px;
-            padding: 0.9rem;
-        }
-    }
-</style>
-"""
+MAX_PARALLEL_DOWNLOADS = int(os.getenv("YT_DL_MAX_WORKERS", "8"))
 
 
-def init_session_state() -> None:
-    """Inizializza lo stato della sessione usato dalla UI."""
-    defaults: dict[str, Any] = {
-        "url_input": "",
-        "format_choice": "MP4 Video",
-        "preview_url": "",
-        "video_info": None,
-        "is_downloading": False,
-        "download_progress": 0,
-        "download_status": "",
-        "current_file": "",
-        "error_message": "",
-        "success_message": "",
-    }
+TRANSLATIONS: dict[str, dict[str, str]] = {
+    "it": {
+        "app_title": "YouTube Downloader",
+        "hero_title": "Scarica da YouTube in modo rapido",
+        "hero_subtitle": "Incolla un link, verifica l'anteprima e scarica in MP3 o MP4.",
+        "url_label": "URL video YouTube",
+        "url_placeholder": "https://www.youtube.com/watch?v=...",
+        "format_label": "Formato",
+        "format_mp3": "MP3 Audio",
+        "format_mp4": "MP4 Video",
+        "download_button": "Scarica",
+        "bottom_bar_label": "Azione rapida",
+        "preview_title": "Anteprima",
+        "downloads_title": "Download della sessione",
+        "no_downloads": "Nessun download in questa sessione.",
+        "no_files": "Nessun file locale nella sessione.",
+        "session_files": "File locali sessione",
+        "status_queued": "In coda",
+        "status_downloading": "Download in corso",
+        "status_finished": "Completato",
+        "status_error": "Errore",
+        "loading_preview": "Recupero anteprima...",
+        "invalid_url": "URL non valido. Inserisci un link YouTube corretto.",
+        "preview_error": "Impossibile recuperare l'anteprima.",
+        "download_started": "Download avviato.",
+        "download_failed": "Download fallito.",
+        "download_ready": "File pronto",
+        "channel": "Canale",
+        "duration": "Durata",
+        "views": "Visualizzazioni",
+        "live_warning": "Live stream rilevato: il download potrebbe non essere disponibile.",
+        "copyright_note": "Usa l'app nel rispetto di copyright, ToS YouTube e normativa locale.",
+        "unknown": "N/D",
+    },
+    "en": {
+        "app_title": "YouTube Downloader",
+        "hero_title": "Download from YouTube quickly",
+        "hero_subtitle": "Paste a link, check preview, then download MP3 or MP4.",
+        "url_label": "YouTube video URL",
+        "url_placeholder": "https://www.youtube.com/watch?v=...",
+        "format_label": "Format",
+        "format_mp3": "MP3 Audio",
+        "format_mp4": "MP4 Video",
+        "download_button": "Download",
+        "bottom_bar_label": "Quick action",
+        "preview_title": "Preview",
+        "downloads_title": "Session downloads",
+        "no_downloads": "No downloads in this session.",
+        "no_files": "No local files in this session.",
+        "session_files": "Local session files",
+        "status_queued": "Queued",
+        "status_downloading": "Downloading",
+        "status_finished": "Completed",
+        "status_error": "Error",
+        "loading_preview": "Loading preview...",
+        "invalid_url": "Invalid URL. Please enter a valid YouTube link.",
+        "preview_error": "Unable to load preview.",
+        "download_started": "Download started.",
+        "download_failed": "Download failed.",
+        "download_ready": "File ready",
+        "channel": "Channel",
+        "duration": "Duration",
+        "views": "Views",
+        "live_warning": "Live stream detected: download may not be available.",
+        "copyright_note": "Use responsibly and respect copyright and YouTube terms.",
+        "unknown": "N/A",
+    },
+}
 
-    for key, value in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
+
+@dataclass
+class SessionMeta:
+    """Metadati base associati a una sessione utente."""
+
+    session_id: str
+    language: str
+    created_at: float = field(default_factory=time.time)
 
 
-def format_bytes(bytes_value: float | int | None) -> str:
-    """Formatta byte in formato leggibile (KB, MB, GB)."""
-    if not bytes_value:
-        return "0 B"
+@dataclass
+class DownloadJob:
+    """Stato di un download asincrono avviato da una sessione utente."""
 
-    size = float(bytes_value)
-    for unit in ["B", "KB", "MB", "GB", "TB"]:
-        if size < 1024:
-            return f"{size:.1f} {unit}"
-        size /= 1024
-    return f"{size:.1f} PB"
-
-
-def format_duration(seconds: int | float | None) -> str:
-    """Formatta i secondi in HH:MM:SS o MM:SS."""
-    if not seconds:
-        return "N/D"
-
-    total = int(seconds)
-    minutes, sec = divmod(total, 60)
-    hours, minutes = divmod(minutes, 60)
-    if hours:
-        return f"{hours}:{minutes:02d}:{sec:02d}"
-    return f"{minutes}:{sec:02d}"
+    job_id: str
+    session_id: str
+    url: str
+    output_format: Literal["mp3", "mp4"]
+    language: str
+    status: Literal["queued", "downloading", "finished", "error"] = "queued"
+    progress: float = 0.0
+    downloaded: int = 0
+    total: int = 0
+    speed: float = 0.0
+    eta: float = 0.0
+    file_path: str = ""
+    file_name: str = ""
+    error: str = ""
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
 
 
-def format_eta(seconds: int | float | None) -> str:
-    """Formatta ETA in stringa breve per la barra di progresso."""
-    if seconds is None or seconds <= 0:
-        return "calcolo..."
+class DownloadRequest(BaseModel):
+    """Payload API per avvio download."""
 
-    eta = int(seconds)
-    minutes, sec = divmod(eta, 60)
-    if minutes:
-        return f"{minutes}m {sec:02d}s"
-    return f"{sec}s"
+    url: str
+    format: Literal["mp3", "mp4"]
 
 
-def format_views(value: int | None) -> str:
-    """Formatta il numero di visualizzazioni."""
-    if not value:
-        return "N/D"
-    return f"{value:,}".replace(",", ".")
+class SessionContext(BaseModel):
+    """Contesto risolto per la sessione corrente."""
+
+    session_id: str
+    language: str
+    is_new_cookie: bool
 
 
-def safe_text(value: str) -> str:
-    """Esegue escaping HTML per contenuti dinamici mostrati in markdown HTML."""
-    return html.escape(value or "")
+app = FastAPI(title="YT Downloader", version="2.0.0")
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 
-def render_topbar() -> None:
-    """Renderizza la topbar in stile YouTube."""
-    st.markdown(
-        """
-        <div class="yt-topbar">
-            <div class="yt-brand">
-                <span class="yt-logo">▶</span>
-                <span>YouTube Downloader</span>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+_store_lock = threading.RLock()
+_executor = ThreadPoolExecutor(max_workers=MAX_PARALLEL_DOWNLOADS, thread_name_prefix="yt-download")
+_sessions: dict[str, SessionMeta] = {}
+_jobs: dict[str, DownloadJob] = {}
+_session_jobs: dict[str, list[str]] = defaultdict(list)
+
+
+def _t(language: str, key: str) -> str:
+    """Restituisce traduzione per chiave/lingua con fallback inglese."""
+    return TRANSLATIONS.get(language, TRANSLATIONS["en"]).get(key, key)
+
+
+def _detect_system_language() -> str:
+    """Rileva lingua OS come fallback quando header browser non disponibile."""
+    lang_code = ""
+    try:
+        locale_value = locale.getlocale()[0]
+        if locale_value:
+            lang_code = locale_value.split("_")[0].lower()
+    except Exception:
+        lang_code = ""
+
+    if lang_code in TRANSLATIONS:
+        return lang_code
+    return "en"
+
+
+def _detect_language_from_request(request: Request) -> str:
+    """Rileva lingua da browser (Accept-Language), fallback a lingua OS."""
+    header = request.headers.get("accept-language", "")
+    if header:
+        for token in header.split(","):
+            code = token.split(";")[0].strip().lower()
+            if not code:
+                continue
+            base_code = code.split("-")[0]
+            if base_code in TRANSLATIONS:
+                return base_code
+    return _detect_system_language()
+
+
+def _session_download_dir(session_id: str) -> Path:
+    """Restituisce la directory locale dedicata alla sessione utente."""
+    session_dir = DOWNLOAD_ROOT / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    return session_dir
+
+
+def _get_or_create_session(request: Request) -> SessionContext:
+    """Recupera o crea sessione tramite cookie HTTP-only."""
+    raw_cookie = request.cookies.get(SESSION_COOKIE_NAME, "")
+    valid_cookie = bool(SESSION_COOKIE_PATTERN.match(raw_cookie))
+
+    session_id = raw_cookie if valid_cookie else uuid.uuid4().hex
+    is_new_cookie = not valid_cookie
+
+    with _store_lock:
+        if session_id not in _sessions:
+            language = _detect_language_from_request(request)
+            _sessions[session_id] = SessionMeta(session_id=session_id, language=language)
+        else:
+            language = _sessions[session_id].language
+
+    _session_download_dir(session_id)
+
+    return SessionContext(session_id=session_id, language=language, is_new_cookie=is_new_cookie)
+
+
+def _apply_session_cookie(response: Response, context: SessionContext) -> None:
+    """Applica cookie sessione al client quando necessario."""
+    if not context.is_new_cookie:
+        return
+
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=context.session_id,
+        max_age=SESSION_COOKIE_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+        secure=False,
+        path="/",
     )
 
 
-def render_intro() -> None:
-    """Renderizza il blocco introduttivo dell'app."""
-    st.markdown(
-        """
-        <div class="surface">
-            <h1 class="hero-title">Scarica da YouTube in modo rapido</h1>
-            <p class="hero-subtitle">
-                Incolla un link, verifica l'anteprima e scarica in MP3 o MP4.
-            </p>
-        </div>
-        """,
-        unsafe_allow_html=True,
+def _update_job(job_id: str, **kwargs: Any) -> None:
+    """Aggiorna in modo thread-safe lo stato di un job."""
+    with _store_lock:
+        job = _jobs.get(job_id)
+        if not job:
+            return
+
+        for key, value in kwargs.items():
+            setattr(job, key, value)
+        job.updated_at = time.time()
+
+
+def _progress_callback_factory(job_id: str):
+    """Crea callback progresso per propagare stato da yt-dlp al job."""
+
+    def _callback(payload: dict[str, Any]) -> None:
+        status = payload.get("status")
+        if status == "downloading":
+            _update_job(
+                job_id,
+                status="downloading",
+                progress=float(payload.get("percentage", 0.0)),
+                downloaded=int(payload.get("downloaded", 0)),
+                total=int(payload.get("total", 0)),
+                speed=float(payload.get("speed") or 0.0),
+                eta=float(payload.get("eta") or 0.0),
+            )
+        elif status == "finished":
+            _update_job(job_id, progress=100.0)
+
+    return _callback
+
+
+def _execute_download(job_id: str) -> None:
+    """Esegue il download in thread separato, isolato per sessione utente."""
+    with _store_lock:
+        job = _jobs.get(job_id)
+        if not job:
+            return
+        session_id = job.session_id
+        url = job.url
+        output_format = job.output_format
+
+    _update_job(job_id, status="downloading", progress=0.0, error="")
+
+    output_dir = _session_download_dir(session_id)
+    progress_cb = _progress_callback_factory(job_id)
+
+    try:
+        if output_format == "mp3":
+            file_path = download_mp3(url, output_dir=str(output_dir), progress_callback=progress_cb)
+        else:
+            file_path = download_mp4(url, output_dir=str(output_dir), progress_callback=progress_cb)
+
+        resolved_path = Path(file_path).resolve()
+        _update_job(
+            job_id,
+            status="finished",
+            progress=100.0,
+            file_path=str(resolved_path),
+            file_name=resolved_path.name,
+            error="",
+        )
+    except DownloadError as exc:
+        _update_job(job_id, status="error", error=str(exc))
+    except Exception as exc:
+        _update_job(job_id, status="error", error=str(exc))
+
+
+def _serialize_job(job: DownloadJob) -> dict[str, Any]:
+    """Serializza job per API JSON."""
+    return {
+        "id": job.job_id,
+        "url": job.url,
+        "format": job.output_format,
+        "status": job.status,
+        "progress": round(job.progress, 2),
+        "downloaded": job.downloaded,
+        "total": job.total,
+        "speed": job.speed,
+        "eta": job.eta,
+        "file_name": job.file_name,
+        "error": job.error,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+    }
+
+
+def _list_session_files(session_id: str) -> list[dict[str, Any]]:
+    """Restituisce file locali presenti nella directory dedicata alla sessione."""
+    session_dir = _session_download_dir(session_id)
+    files: list[dict[str, Any]] = []
+
+    for entry in session_dir.iterdir():
+        if not entry.is_file():
+            continue
+        files.append(
+            {
+                "name": entry.name,
+                "size": entry.stat().st_size,
+                "modified": entry.stat().st_mtime,
+                "url": f"/api/files/{quote(entry.name)}",
+            }
+        )
+
+    files.sort(key=lambda item: item["modified"], reverse=True)
+    return files
+
+
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request) -> HTMLResponse:
+    """Render pagina principale con lingua e sessione risolte."""
+    session = _get_or_create_session(request)
+    translations = TRANSLATIONS.get(session.language, TRANSLATIONS["en"])
+
+    response = templates.TemplateResponse(
+        request=request,
+        name="index.html",
+        context={
+            "lang": session.language,
+            "texts": translations,
+            "config": {
+                "pollIntervalMs": 1500,
+                "maxParallelDownloads": MAX_PARALLEL_DOWNLOADS,
+            },
+        },
     )
+    _apply_session_cookie(response, session)
+    return response
 
 
-def render_controls() -> tuple[str, str, bool]:
-    """Renderizza input URL, formato e azione principale."""
-    st.markdown('<div class="surface">', unsafe_allow_html=True)
-
-    url = st.text_input(
-        "URL video YouTube",
-        key="url_input",
-        placeholder="https://www.youtube.com/watch?v=...",
-        disabled=st.session_state.is_downloading,
-    ).strip()
-
-    format_choice = st.radio(
-        "Formato",
-        ["MP3 Audio", "MP4 Video"],
-        horizontal=True,
-        key="format_choice",
-        disabled=st.session_state.is_downloading,
-    )
-
-    download_clicked = st.button(
-        "Scarica",
-        type="primary",
-        use_container_width=True,
-        disabled=st.session_state.is_downloading or not validate_url(url),
-    )
-
-    st.markdown("</div>", unsafe_allow_html=True)
-    return url, format_choice, download_clicked
-
-
-def load_preview(url: str, strict: bool = False) -> bool:
-    """Carica e salva in sessione i metadati video dell'URL richiesto."""
-    st.session_state.error_message = ""
+@app.get("/api/preview")
+async def api_preview(request: Request, response: Response, url: str) -> Any:
+    """Restituisce anteprima video se URL valido."""
+    session = _get_or_create_session(request)
+    _apply_session_cookie(response, session)
 
     if not validate_url(url):
-        st.session_state.video_info = None
-        st.session_state.preview_url = ""
-        if strict and url:
-            st.session_state.error_message = "URL non valido. Inserisci un link YouTube corretto."
-        return False
-
-    if st.session_state.preview_url == url and st.session_state.video_info:
-        return True
+        return {"ok": False, "error": _t(session.language, "invalid_url")}
 
     try:
-        with st.spinner("Recupero anteprima video..."):
-            info = get_video_info(url)
-        st.session_state.video_info = info
-        st.session_state.preview_url = url
-        return True
+        info = get_video_info(url)
+        return {"ok": True, "info": info}
     except DownloadError as exc:
-        st.session_state.video_info = None
-        st.session_state.preview_url = ""
-        st.session_state.error_message = str(exc)
-    except Exception as exc:
-        st.session_state.video_info = None
-        st.session_state.preview_url = ""
-        st.session_state.error_message = f"Errore imprevisto durante l'anteprima: {exc}"
-
-    return False
+        return {"ok": False, "error": str(exc) or _t(session.language, "preview_error")}
+    except Exception:
+        return {"ok": False, "error": _t(session.language, "preview_error")}
 
 
-def render_video_preview() -> None:
-    """Mostra la card anteprima del video caricato."""
-    info = st.session_state.video_info
-    if not info:
-        return
+@app.post("/api/download")
+async def api_download(
+    payload: DownloadRequest,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    """Avvia un nuovo job download asincrono per la sessione corrente."""
+    session = _get_or_create_session(request)
+    _apply_session_cookie(response, session)
 
-    st.markdown('<div class="surface">', unsafe_allow_html=True)
-    col_thumb, col_details = st.columns([1.1, 1.5], gap="large")
+    if not validate_url(payload.url):
+        return {"ok": False, "error": _t(session.language, "invalid_url")}
 
-    with col_thumb:
-        if info.get("thumbnail"):
-            st.image(info["thumbnail"], use_container_width=True)
-        else:
-            st.caption("Anteprima immagine non disponibile")
+    job_id = uuid.uuid4().hex
+    job = DownloadJob(
+        job_id=job_id,
+        session_id=session.session_id,
+        url=payload.url,
+        output_format=payload.format,
+        language=session.language,
+    )
 
-    with col_details:
-        st.markdown(
-            f"<p class='preview-title'>{safe_text(info.get('title', 'Titolo non disponibile'))}</p>",
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            f"<p class='preview-meta'>Canale: {safe_text(info.get('uploader', 'Sconosciuto'))}</p>",
-            unsafe_allow_html=True,
-        )
+    with _store_lock:
+        _jobs[job_id] = job
+        _session_jobs[session.session_id].append(job_id)
 
-        st.markdown(
-            f"""
-            <div class="chip-row">
-                <span class="chip">Durata: {format_duration(info.get('duration'))}</span>
-                <span class="chip">Visualizzazioni: {format_views(info.get('view_count'))}</span>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    _executor.submit(_execute_download, job_id)
 
-        if info.get("is_live"):
-            st.warning("Live stream rilevato: il download potrebbe non essere disponibile.")
-
-    st.markdown("</div>", unsafe_allow_html=True)
+    return {"ok": True, "job_id": job_id, "message": _t(session.language, "download_started")}
 
 
-def run_download(url: str, format_choice: str) -> None:
-    """Esegue il download e aggiorna in tempo reale stato e progresso."""
-    st.session_state.is_downloading = True
-    st.session_state.error_message = ""
-    st.session_state.success_message = ""
-    st.session_state.download_progress = 0
-    st.session_state.download_status = ""
+@app.get("/api/downloads")
+async def api_downloads(request: Request, response: Response) -> dict[str, Any]:
+    """Lista job e file locali visibili per la sessione corrente."""
+    session = _get_or_create_session(request)
+    _apply_session_cookie(response, session)
 
-    progress_container = st.container()
-    with progress_container:
-        st.markdown('<div class="surface">', unsafe_allow_html=True)
-        progress_bar = st.progress(0)
-        status_placeholder = st.empty()
-        st.markdown("</div>", unsafe_allow_html=True)
+    with _store_lock:
+        job_ids = list(_session_jobs.get(session.session_id, []))
+        jobs_payload = [_serialize_job(_jobs[job_id]) for job_id in job_ids if job_id in _jobs]
 
-    def progress_callback(data: dict[str, Any]) -> None:
-        status = data.get("status")
+    jobs_payload.sort(key=lambda item: item["created_at"], reverse=True)
 
-        if status == "downloading":
-            percentage = max(0, min(100, int(data.get("percentage", 0))))
-            st.session_state.download_progress = percentage
-
-            speed = data.get("speed")
-            speed_text = f"{format_bytes(speed)}/s" if speed else "N/D"
-            eta_text = format_eta(data.get("eta"))
-            downloaded = format_bytes(data.get("downloaded"))
-            total = format_bytes(data.get("total"))
-
-            progress_bar.progress(percentage)
-            status_placeholder.markdown(
-                f"<p class='status-msg'>Download {percentage}% · {downloaded}/{total} · {speed_text} · ETA {eta_text}</p>",
-                unsafe_allow_html=True,
-            )
-
-        elif status == "finished":
-            st.session_state.download_progress = 100
-            progress_bar.progress(100)
-            status_placeholder.markdown(
-                "<p class='status-msg'>Download completato. Preparazione file finale...</p>",
-                unsafe_allow_html=True,
-            )
-
-    try:
-        downloader = download_mp3 if format_choice == "MP3 Audio" else download_mp4
-        downloaded_file = downloader(url, progress_callback=progress_callback)
-
-        if not downloaded_file or not os.path.exists(downloaded_file):
-            raise DownloadError("Download completato ma file non trovato nella cartella downloads.")
-
-        file_name = os.path.basename(downloaded_file)
-        st.session_state.current_file = downloaded_file
-        st.session_state.success_message = f"Download completato: {file_name}"
-    except DownloadError as exc:
-        st.session_state.error_message = str(exc)
-    except Exception as exc:
-        st.session_state.error_message = f"Errore imprevisto durante il download: {exc}"
-    finally:
-        st.session_state.is_downloading = False
+    return {
+        "ok": True,
+        "jobs": jobs_payload,
+        "files": _list_session_files(session.session_id),
+    }
 
 
-def render_messages() -> None:
-    """Renderizza eventuali messaggi di successo o errore."""
-    if st.session_state.success_message:
-        st.markdown(
-            f"<div class='alert-ok'>✅ {safe_text(st.session_state.success_message)}</div>",
-            unsafe_allow_html=True,
-        )
+@app.get("/api/downloads/{job_id}/file")
+async def api_download_file(job_id: str, request: Request, response: Response) -> Any:
+    """Scarica il file associato a un job completato della sessione corrente."""
+    session = _get_or_create_session(request)
+    _apply_session_cookie(response, session)
 
-    if st.session_state.error_message:
-        st.markdown(
-            f"<div class='alert-error'>❌ {safe_text(st.session_state.error_message)}</div>",
-            unsafe_allow_html=True,
-        )
+    with _store_lock:
+        job = _jobs.get(job_id)
+        if not job or job.session_id != session.session_id:
+            return JSONResponse({"ok": False, "error": "Not found"}, status_code=404)
 
+        file_path = Path(job.file_path)
 
-def render_download_result() -> None:
-    """Mostra i dettagli finali e il pulsante di download verso il dispositivo locale."""
-    file_path = st.session_state.current_file
-    if not file_path:
-        return
+    if not file_path.exists() or not file_path.is_file():
+        return JSONResponse({"ok": False, "error": "File not found"}, status_code=404)
 
-    if not os.path.exists(file_path):
-        st.session_state.current_file = ""
-        st.session_state.error_message = "Il file scaricato non è più disponibile nella cartella downloads."
-        return
-
-    file_name = os.path.basename(file_path)
-    file_size = os.path.getsize(file_path)
-    mime_type = "audio/mpeg" if file_name.lower().endswith(".mp3") else "video/mp4"
-
-    st.markdown('<div class="surface">', unsafe_allow_html=True)
-    st.subheader("File pronto")
-    st.caption(f"{file_name} · {format_bytes(file_size)}")
-
-    with open(file_path, "rb") as file_obj:
-        st.download_button(
-            "Scarica sul dispositivo",
-            data=file_obj.read(),
-            file_name=file_name,
-            mime=mime_type,
-            type="primary",
-            use_container_width=True,
-        )
-
-    st.markdown("</div>", unsafe_allow_html=True)
+    return FileResponse(path=str(file_path), filename=job.file_name or file_path.name)
 
 
-def render_library() -> None:
-    """Mostra i file disponibili in `downloads` e consente pulizia rapida."""
-    files = get_downloaded_files()
+@app.get("/api/files/{file_name}")
+async def api_download_session_file(
+    file_name: str,
+    request: Request,
+    response: Response,
+) -> Any:
+    """Scarica file diretto dalla directory della sessione corrente."""
+    session = _get_or_create_session(request)
+    _apply_session_cookie(response, session)
 
-    st.markdown('<div class="surface">', unsafe_allow_html=True)
-    st.subheader("Libreria locale")
+    safe_name = Path(file_name).name
+    target = _session_download_dir(session.session_id) / safe_name
 
-    if not files:
-        st.caption("Nessun file presente in downloads.")
-    else:
-        for index, item in enumerate(files[:8]):
-            col_name, col_size, col_time = st.columns([3.2, 1.1, 1.3])
-            with col_name:
-                st.markdown(
-                    f"<div class='library-name'>{safe_text(item['name'])}</div>",
-                    unsafe_allow_html=True,
-                )
-            with col_size:
-                st.markdown(
-                    f"<div class='library-label'>{format_bytes(item['size'])}</div>",
-                    unsafe_allow_html=True,
-                )
-            with col_time:
-                modified = datetime.fromtimestamp(item["modified"]).strftime("%d/%m %H:%M")
-                st.markdown(
-                    f"<div class='library-label'>{modified}</div>",
-                    unsafe_allow_html=True,
-                )
+    if not target.exists() or not target.is_file():
+        return JSONResponse({"ok": False, "error": "File not found"}, status_code=404)
 
-    if st.button("Pulisci cartella downloads", use_container_width=True):
-        cleanup_downloads()
-        if st.session_state.current_file and not os.path.exists(st.session_state.current_file):
-            st.session_state.current_file = ""
-        st.session_state.success_message = "Cartella downloads pulita."
-        st.rerun()
-
-    st.markdown("</div>", unsafe_allow_html=True)
+    return FileResponse(path=str(target), filename=safe_name)
 
 
-def render_footer() -> None:
-    """Renderizza il footer legale minimale."""
-    st.caption("Usa l'app responsabilmente e nel rispetto di copyright e termini di servizio.")
-
-
-def main() -> None:
-    """Entry point dell'app Streamlit."""
-    init_session_state()
-    st.markdown(APP_CSS, unsafe_allow_html=True)
-
-    render_topbar()
-    render_intro()
-
-    url, format_choice, download_clicked = render_controls()
-
-    # Se l'utente cambia URL, invalida l'anteprima precedente.
-    if url and st.session_state.preview_url and url != st.session_state.preview_url:
-        st.session_state.video_info = None
-        st.session_state.preview_url = ""
-
-    if not url and st.session_state.preview_url:
-        st.session_state.video_info = None
-        st.session_state.preview_url = ""
-        st.session_state.error_message = ""
-
-    # Anteprima automatica non appena l'URL YouTube diventa valido.
-    if url and not st.session_state.is_downloading and url != st.session_state.preview_url and validate_url(url):
-        load_preview(url)
-
-    if download_clicked:
-        if load_preview(url, strict=True):
-            run_download(url, format_choice)
-
-    render_messages()
-    render_video_preview()
-    render_download_result()
-    render_library()
-    render_footer()
-
-
-if __name__ == "__main__":
-    main()
+@app.on_event("shutdown")
+def on_shutdown() -> None:
+    """Rilascia thread pool su stop applicazione."""
+    _executor.shutdown(wait=False, cancel_futures=False)
