@@ -5,6 +5,7 @@ Esegue test unitari sulle funzioni principali.
 
 import os
 import pytest
+import subprocess
 from unittest.mock import patch, MagicMock
 from downloader import (
     validate_url,
@@ -14,6 +15,10 @@ from downloader import (
     download_mp4,
     cleanup_downloads,
     get_downloaded_files,
+    _map_download_error,
+    _sanitize_error_message,
+    verify_download_integrity,
+    _probe_media_duration,
     DownloadError
 )
 
@@ -146,8 +151,9 @@ class TestDownloadMp3:
 
         with patch('os.path.exists') as mock_exists:
             mock_exists.return_value = True
-            result = download_mp3("https://www.youtube.com/watch?v=dQw4w9WgXcQ", output_dir='/tmp/downloads')
-            assert result.endswith('.mp3')
+            with patch('downloader.verify_download_integrity', return_value=(True, '')):
+                result = download_mp3("https://www.youtube.com/watch?v=dQw4w9WgXcQ", output_dir='/tmp/downloads')
+                assert result.endswith('.mp3')
 
     @patch('downloader.YoutubeDL')
     def test_download_mp3_copyright_error(self, mock_ytdl_class):
@@ -188,8 +194,9 @@ class TestDownloadMp4:
 
         with patch('os.path.exists') as mock_exists:
             mock_exists.return_value = True
-            result = download_mp4("https://www.youtube.com/watch?v=dQw4w9WgXcQ", output_dir='/tmp/downloads')
-            assert result.endswith('.mp4')
+            with patch('downloader.verify_download_integrity', return_value=(True, '')):
+                result = download_mp4("https://www.youtube.com/watch?v=dQw4w9WgXcQ", output_dir='/tmp/downloads')
+                assert result.endswith('.mp4')
 
     @patch('downloader.YoutubeDL')
     def test_download_mp4_private_video(self, mock_ytdl_class):
@@ -304,6 +311,103 @@ class TestProgressCallback:
                     )
                 except:
                     pass  # L'errore è atteso dato il mock
+
+
+class TestMediaIntegrity:
+    """Test per verifiche durata/dimensione file scaricati."""
+
+    @patch("downloader.subprocess.run")
+    def test_probe_media_duration_success(self, mock_run):
+        """Estrae durata da ffprobe quando il comando termina con successo."""
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["ffprobe"],
+            returncode=0,
+            stdout="12.345\n",
+            stderr="",
+        )
+
+        duration = _probe_media_duration("/tmp/file.mp4")
+        assert duration == pytest.approx(12.345)
+
+    @patch("downloader.subprocess.run")
+    def test_probe_media_duration_failure(self, mock_run):
+        """Ritorna 0 quando ffprobe non riesce."""
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["ffprobe"],
+            returncode=1,
+            stdout="",
+            stderr="error",
+        )
+
+        duration = _probe_media_duration("/tmp/file.mp4")
+        assert duration == 0.0
+
+    @patch("downloader._probe_media_duration")
+    def test_verify_download_integrity_ok(self, mock_probe, tmp_path):
+        """File valido quando size e durata sono coerenti con l'atteso."""
+        media_file = tmp_path / "sample.mp3"
+        media_file.write_bytes(b"0" * (64 * 1024))
+        mock_probe.return_value = 59.5
+
+        ok, reason = verify_download_integrity(str(media_file), expected_duration=60)
+
+        assert ok is True
+        assert reason == ""
+
+    @patch("downloader._probe_media_duration")
+    def test_verify_download_integrity_truncated_duration(self, mock_probe, tmp_path):
+        """File considerato incompleto quando la durata e troppo corta."""
+        media_file = tmp_path / "sample.mp4"
+        media_file.write_bytes(b"0" * (128 * 1024))
+        mock_probe.return_value = 15.0
+
+        ok, reason = verify_download_integrity(str(media_file), expected_duration=120)
+
+        assert ok is False
+        assert "Durata file inferiore" in reason
+
+    def test_verify_download_integrity_too_small(self, tmp_path):
+        """File molto piccolo: probabile download incompleto."""
+        media_file = tmp_path / "sample.mp3"
+        media_file.write_bytes(b"1234")
+
+        ok, reason = verify_download_integrity(str(media_file), expected_duration=20)
+
+        assert ok is False
+        assert "troppo piccolo" in reason
+
+
+class TestErrorMapping:
+    """Test per sanitizzazione e mapping errori yt-dlp."""
+
+    def test_sanitize_error_message_removes_ansi_codes(self):
+        """Rimuove sequenze ANSI dal messaggio errore."""
+        raw = "\x1b[0;31mERROR:\x1b[0m failure message"
+        assert _sanitize_error_message(raw) == "ERROR: failure message"
+
+    def test_map_download_error_not_a_bot(self):
+        """Mostra messaggio utente chiaro per challenge anti-bot YouTube."""
+        error = Exception("ERROR: Sign in to confirm you're not a bot. Use --cookies-from-browser")
+        mapped = _map_download_error(error)
+        assert "verifica anti-bot" in mapped
+        assert "YT_COOKIES_FILE" in mapped
+
+
+@pytest.mark.integration
+def test_real_download_duration_and_size(tmp_path):
+    """Test integrato opzionale: verifica durata/size su download reale YouTube."""
+    if os.getenv("YT_ENABLE_REAL_DOWNLOAD_TESTS") != "1":
+        pytest.skip("Test integrazione disabilitato: imposta YT_ENABLE_REAL_DOWNLOAD_TESTS=1")
+
+    url = os.getenv("YT_TEST_URL", "https://www.youtube.com/watch?v=BaW_jenozKc")
+    downloaded = download_mp4(url, output_dir=str(tmp_path))
+    assert os.path.exists(downloaded)
+
+    file_size = os.path.getsize(downloaded)
+    assert file_size > 100 * 1024
+
+    valid, reason = verify_download_integrity(downloaded, expected_duration=10)
+    assert valid, reason
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ Servizio web Python nativo (senza Streamlit) per scaricare contenuti YouTube in 
 - anteprima automatica del video
 - download paralleli tra sessioni diverse
 - directory locale separata per ogni sessione (`downloads/<session_id>`)
+- archivio globale di tutti i file scaricati (`downloads/all_youtube_downloads`)
 - lingua automatica da browser (fallback lingua del sistema operativo)
 
 ## 1) Prerequisiti
@@ -71,6 +72,7 @@ URL locale: `http://localhost:8501`
 
 - Cookie sessione: `yt_session_id` (HTTP-only, SameSite=Lax).
 - Ogni sessione ha una directory dedicata: `downloads/<session_id>`.
+- Tutti i download completati vengono anche copiati in: `downloads/all_youtube_downloads`.
 - I file di una sessione non compaiono nelle altre sessioni.
 - Download concorrenti tra sessioni differenti gestiti in parallelo tramite thread pool backend.
 
@@ -89,6 +91,14 @@ URL locale: `http://localhost:8501`
 ```bash
 python -m pytest -q
 ```
+
+## Test integrazione durata/lunghezza (opzionali)
+```bash
+YT_ENABLE_REAL_DOWNLOAD_TESTS=1 python -m pytest -q -m integration
+```
+
+Variabili utili:
+- `YT_TEST_URL`: URL YouTube da usare per il test integrato (default: video test `BaW_jenozKc`).
 
 ## Riavvio rapido locale
 ```bash
@@ -197,6 +207,17 @@ Riavvia servizio:
 
 ## `FFmpeg not found`
 Verifica installazione e `PATH`.
+
+## `Sign in to confirm you're not a bot`
+YouTube puo richiedere autenticazione/cookie. Configura una di queste variabili ambiente prima di avviare il backend:
+
+```bash
+export YT_COOKIES_FILE=/percorso/cookies.txt
+# oppure
+export YT_COOKIES_BROWSER=chrome
+```
+
+Valori tipici per `YT_COOKIES_BROWSER`: `chrome`, `firefox`, `safari`.
 
 ## `ModuleNotFoundError: No module named 'yt_dlp'`
 Stai avviando `uvicorn` fuori dal virtualenv.

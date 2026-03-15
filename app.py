@@ -5,6 +5,7 @@ from __future__ import annotations
 import locale
 import os
 import re
+import shutil
 import threading
 import time
 import uuid
@@ -26,6 +27,7 @@ from downloader import DownloadError, download_mp3, download_mp4, get_video_info
 
 BASE_DIR = Path(__file__).resolve().parent
 DOWNLOAD_ROOT = BASE_DIR / "downloads"
+DOWNLOAD_ARCHIVE_DIR = DOWNLOAD_ROOT / "all_youtube_downloads"
 TEMPLATES_DIR = BASE_DIR / "templates"
 STATIC_DIR = BASE_DIR / "static"
 
@@ -156,6 +158,8 @@ app = FastAPI(title="YT Downloader", version="2.0.0")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
+DOWNLOAD_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+
 
 _store_lock = threading.RLock()
 _executor = ThreadPoolExecutor(max_workers=MAX_PARALLEL_DOWNLOADS, thread_name_prefix="yt-download")
@@ -203,6 +207,20 @@ def _session_download_dir(session_id: str) -> Path:
     session_dir = DOWNLOAD_ROOT / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
     return session_dir
+
+
+def _archive_download(file_path: Path, job: DownloadJob) -> Path | None:
+    """Duplica il file completato in una cartella archivio comune."""
+    try:
+        DOWNLOAD_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        safe_name = file_path.name.replace("/", "_")
+        archive_name = f"{timestamp}_{job.session_id}_{job.job_id[:8]}_{safe_name}"
+        destination = DOWNLOAD_ARCHIVE_DIR / archive_name
+        shutil.copy2(file_path, destination)
+        return destination
+    except Exception:
+        return None
 
 
 def _get_or_create_session(request: Request) -> SessionContext:
@@ -296,6 +314,7 @@ def _execute_download(job_id: str) -> None:
             file_path = download_mp4(url, output_dir=str(output_dir), progress_callback=progress_cb)
 
         resolved_path = Path(file_path).resolve()
+        _archive_download(resolved_path, job)
         _update_job(
             job_id,
             status="finished",

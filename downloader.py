@@ -6,7 +6,9 @@ Supporta formati MP3 (audio) e MP4 (video).
 from __future__ import annotations
 
 import os
+import re
 import shutil
+import subprocess
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -15,6 +17,10 @@ from yt_dlp import YoutubeDL
 
 class DownloadError(Exception):
     """Eccezione personalizzata per errori di download."""
+
+
+TEMPORARY_DOWNLOAD_SUFFIXES = (".part", ".ytdl", ".tmp")
+ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 
 
 def _configure_js_runtime(ydl: YoutubeDL) -> None:
@@ -43,7 +49,23 @@ def _get_yt_dlp_opts(base_opts: dict[str, Any]) -> dict[str, Any]:
     opts = base_opts.copy()
     opts["remote_components"] = ["ejs:github"]
     opts["noplaylist"] = True
+
+    # Supporto opzionale cookie per superare challenge anti-bot di YouTube.
+    cookie_file = os.getenv("YT_COOKIES_FILE", "").strip()
+    if cookie_file:
+        opts["cookiefile"] = cookie_file
+
+    cookie_browser = os.getenv("YT_COOKIES_BROWSER", "").strip().lower()
+    if cookie_browser:
+        opts["cookiesfrombrowser"] = (cookie_browser, None, None, None)
+
     return opts
+
+
+def _sanitize_error_message(raw_message: str) -> str:
+    """Rimuove codici ANSI e normalizza il testo errore da librerie esterne."""
+    no_ansi = ANSI_ESCAPE_RE.sub("", raw_message or "")
+    return " ".join(no_ansi.split())
 
 
 def _is_video_id(candidate: str) -> bool:
@@ -127,7 +149,15 @@ def validate_url(url: Optional[str]) -> bool:
 
 def _map_download_error(raw_error: Exception) -> str:
     """Converte gli errori tecnici in messaggi utente più chiari."""
-    error_msg = str(raw_error).lower()
+    cleaned_message = _sanitize_error_message(str(raw_error))
+    error_msg = cleaned_message.lower()
+
+    if "not a bot" in error_msg or "cookies-from-browser" in error_msg:
+        return (
+            "YouTube richiede verifica anti-bot. Configura i cookie impostando "
+            "YT_COOKIES_FILE (file cookie Netscape) o YT_COOKIES_BROWSER "
+            "(es. chrome, firefox, safari)."
+        )
 
     if "copyright" in error_msg or "blocked" in error_msg:
         return "Questo video è bloccato per restrizioni di copyright."
@@ -142,7 +172,7 @@ def _map_download_error(raw_error: Exception) -> str:
     if "failed to resolve" in error_msg or "name resolution" in error_msg:
         return "Errore di rete/DNS: impossibile raggiungere YouTube dal server."
 
-    return f"Errore durante il download: {raw_error}"
+    return f"Errore durante il download: {cleaned_message}"
 
 
 def get_video_info(url: str) -> dict[str, Any]:
@@ -232,15 +262,83 @@ def _resolve_output_path(prepared_filename: str, expected_extension: str) -> str
     stem = os.path.basename(base_path)
 
     try:
+        candidates: list[str] = []
         for entry in os.listdir(directory):
             if entry.startswith(stem):
                 candidate = os.path.join(directory, entry)
-                if os.path.isfile(candidate):
-                    return candidate
+                if os.path.isfile(candidate) and not candidate.endswith(TEMPORARY_DOWNLOAD_SUFFIXES):
+                    candidates.append(candidate)
+
+        if candidates:
+            # Seleziona il file piu recente per evitare collisioni con download precedenti.
+            candidates.sort(key=lambda item: os.path.getmtime(item), reverse=True)
+            return candidates[0]
     except OSError:
         pass
 
     return expected_path
+
+
+def _probe_media_duration(file_path: str) -> float:
+    """Recupera la durata media del file usando ffprobe."""
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        file_path,
+    ]
+
+    try:
+        result = subprocess.run(command, check=False, capture_output=True, text=True)
+    except OSError:
+        return 0.0
+
+    if result.returncode != 0:
+        return 0.0
+
+    output = (result.stdout or "").strip()
+    try:
+        return float(output)
+    except ValueError:
+        return 0.0
+
+
+def verify_download_integrity(file_path: str, expected_duration: float | int) -> tuple[bool, str]:
+    """Verifica che il file scaricato non sia troncato usando size e durata."""
+    if not os.path.exists(file_path) or not os.path.isfile(file_path):
+        return False, "File non trovato al termine del download."
+
+    file_size = os.path.getsize(file_path)
+    if file_size < 10 * 1024:
+        return False, "File troppo piccolo: probabile download incompleto."
+
+    try:
+        expected_seconds = float(expected_duration)
+    except (TypeError, ValueError):
+        expected_seconds = 0.0
+
+    if expected_seconds <= 0:
+        return True, ""
+
+    actual_seconds = _probe_media_duration(file_path)
+    if actual_seconds <= 0:
+        return False, "Impossibile misurare la durata del file con ffprobe."
+
+    tolerance = max(2.5, expected_seconds * 0.08)
+    if actual_seconds + tolerance < expected_seconds:
+        return (
+            False,
+            (
+                f"Durata file inferiore all'atteso (atteso {expected_seconds:.2f}s, "
+                f"ottenuto {actual_seconds:.2f}s)."
+            ),
+        )
+
+    return True, ""
 
 
 def download_mp3(
@@ -275,6 +373,10 @@ def download_mp3(
             "outtmpl": os.path.join(output_dir, "%(title)s.%(ext)s"),
             "quiet": True,
             "no_warnings": True,
+            "retries": 10,
+            "fragment_retries": 10,
+            "continuedl": True,
+            "skip_unavailable_fragments": False,
             "postprocessors": [
                 {
                     "key": "FFmpegExtractAudio",
@@ -286,14 +388,33 @@ def download_mp3(
         }
     )
 
-    try:
-        with YoutubeDL(ydl_opts) as ydl:
-            _configure_js_runtime(ydl)
-            info = ydl.extract_info(normalized_url, download=True)
-            prepared_filename = ydl.prepare_filename(info)
-            return _resolve_output_path(prepared_filename, "mp3")
-    except Exception as exc:
-        raise DownloadError(_map_download_error(exc)) from exc
+    for attempt in range(2):
+        try:
+            with YoutubeDL(ydl_opts) as ydl:
+                _configure_js_runtime(ydl)
+                info = ydl.extract_info(normalized_url, download=True)
+                prepared_filename = ydl.prepare_filename(info)
+                downloaded_path = _resolve_output_path(prepared_filename, "mp3")
+                expected_duration = info.get("duration", 0)
+
+            is_valid, reason = verify_download_integrity(downloaded_path, expected_duration)
+            if is_valid:
+                return downloaded_path
+
+            if attempt == 0:
+                try:
+                    os.remove(downloaded_path)
+                except OSError:
+                    pass
+                continue
+
+            raise DownloadError(f"Download MP3 incompleto: {reason}")
+        except DownloadError:
+            raise
+        except Exception as exc:
+            raise DownloadError(_map_download_error(exc)) from exc
+
+    raise DownloadError("Download MP3 incompleto dopo piu tentativi.")
 
 
 def download_mp4(
@@ -328,19 +449,42 @@ def download_mp4(
             "outtmpl": os.path.join(output_dir, "%(title)s.%(ext)s"),
             "quiet": True,
             "no_warnings": True,
+            "retries": 10,
+            "fragment_retries": 10,
+            "continuedl": True,
+            "skip_unavailable_fragments": False,
             "merge_output_format": "mp4",
             "progress_hooks": [lambda data: _progress_hook(progress_callback, data)],
         }
     )
 
-    try:
-        with YoutubeDL(ydl_opts) as ydl:
-            _configure_js_runtime(ydl)
-            info = ydl.extract_info(normalized_url, download=True)
-            prepared_filename = ydl.prepare_filename(info)
-            return _resolve_output_path(prepared_filename, "mp4")
-    except Exception as exc:
-        raise DownloadError(_map_download_error(exc)) from exc
+    for attempt in range(2):
+        try:
+            with YoutubeDL(ydl_opts) as ydl:
+                _configure_js_runtime(ydl)
+                info = ydl.extract_info(normalized_url, download=True)
+                prepared_filename = ydl.prepare_filename(info)
+                downloaded_path = _resolve_output_path(prepared_filename, "mp4")
+                expected_duration = info.get("duration", 0)
+
+            is_valid, reason = verify_download_integrity(downloaded_path, expected_duration)
+            if is_valid:
+                return downloaded_path
+
+            if attempt == 0:
+                try:
+                    os.remove(downloaded_path)
+                except OSError:
+                    pass
+                continue
+
+            raise DownloadError(f"Download MP4 incompleto: {reason}")
+        except DownloadError:
+            raise
+        except Exception as exc:
+            raise DownloadError(_map_download_error(exc)) from exc
+
+    raise DownloadError("Download MP4 incompleto dopo piu tentativi.")
 
 
 def cleanup_downloads(output_dir: str = "downloads") -> None:
